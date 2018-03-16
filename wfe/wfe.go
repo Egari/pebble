@@ -63,6 +63,11 @@ const (
 	//   PEBBLE_WFE_NONCEREJECT=15
 	badNonceEnvVar = "PEBBLE_WFE_NONCEREJECT"
 
+	// useCommonNameAsDN defines the environment variable name used to decide
+	// whether or not to use the common name of a CSR as the used DN.
+	// This skips the use of subject alternate names
+	useCommonNameAsDNEnvVar = "PEBBLE_WFE_USECOMMONNAMEASDN"
+
 	// By default when no PEBBLE_WFE_NONCEREJECT is set, what percentage of good
 	// nonces are rejected?
 	defaultNonceReject = 15
@@ -105,14 +110,15 @@ func (th *topHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type WebFrontEndImpl struct {
-	log             *log.Logger
-	db              *db.MemoryStore
-	nonce           *nonceMap
-	nonceErrPercent int
-	clk             clock.Clock
-	va              *va.VAImpl
-	ca              *ca.CAImpl
-	strict          bool
+	log               *log.Logger
+	db                *db.MemoryStore
+	nonce             *nonceMap
+	nonceErrPercent   int
+	clk               clock.Clock
+	va                *va.VAImpl
+	ca                *ca.CAImpl
+	strict            bool
+	useCommonNameAsDN bool
 }
 
 const ToSURL = "data:text/plain,Do%20what%20thou%20wilt"
@@ -147,15 +153,24 @@ func New(
 	}
 	log.Printf("Configured to reject %d%% of good nonces", nonceErrPercent)
 
+	useCommonNameAsDN := false
+	useCommonNameAsDNVal := os.Getenv(useCommonNameAsDNEnvVar)
+	switch useCommonNameAsDNVal {
+	case "1", "true", "True", "TRUE":
+		useCommonNameAsDN = true
+		log.Printf("Configured to use CSR commonName as distinguished name")
+	}
+
 	return WebFrontEndImpl{
-		log:             log,
-		db:              db,
-		nonce:           newNonceMap(),
-		nonceErrPercent: nonceErrPercent,
-		clk:             clk,
-		va:              va,
-		ca:              ca,
-		strict:          strict,
+		log:               log,
+		db:                db,
+		nonce:             newNonceMap(),
+		nonceErrPercent:   nonceErrPercent,
+		clk:               clk,
+		va:                va,
+		ca:                ca,
+		strict:            strict,
+		useCommonNameAsDN: useCommonNameAsDN,
 	}
 }
 
@@ -1133,11 +1148,18 @@ func (wfe *WebFrontEndImpl) FinalizeOrder(
 		return
 	}
 
+	if wfe.useCommonNameAsDN {
+		parsedCSR.DNSNames = append(parsedCSR.DNSNames, parsedCSR.Subject.CommonName)
+	}
+
 	// Check that the CSR has the same number of names as the initial order contained
 	csrNames := uniqueLowerNames(parsedCSR.DNSNames)
 	if len(csrNames) != len(orderNames) {
 		wfe.sendError(acme.UnauthorizedProblem(
 			"Order includes different number of names than CSR specifieds"), response)
+
+		wfe.log.Printf("Order Names: %v", orderNames)
+		wfe.log.Printf("CSR Names: %v", csrNames)
 		return
 	}
 
