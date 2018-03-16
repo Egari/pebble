@@ -44,6 +44,12 @@ const (
 	// invoke Pebble if you wish validation to be done at full speed, e.g.:
 	//   PEBBLE_VA_NOSLEEP=1 pebble
 	noSleepEnvVar = "PEBBLE_VA_NOSLEEP"
+
+	// alwaysValidateEnvVar defines the environment variable name used to signal that the
+	// VA should *not* attempt validation but set the challenge to valid immediately.
+	// Set this to 1 when you invoke Pebble if you wish validation to be skipped, e.g.:
+	//   PEBBLE_VA_SKIP_VALIDATION=1 pebble
+	skipValidationEnvVar = "PEBBLE_VA_SKIP_VALIDATION"
 )
 
 func userAgent() string {
@@ -70,12 +76,13 @@ type vaTask struct {
 }
 
 type VAImpl struct {
-	log      *log.Logger
-	clk      clock.Clock
-	httpPort int
-	tlsPort  int
-	tasks    chan *vaTask
-	sleep    bool
+	log          *log.Logger
+	clk          clock.Clock
+	httpPort     int
+	tlsPort      int
+	tasks        chan *vaTask
+	sleep        bool
+	skipValidate bool
 }
 
 func New(
@@ -83,12 +90,13 @@ func New(
 	clk clock.Clock,
 	httpPort, tlsPort int) *VAImpl {
 	va := &VAImpl{
-		log:      log,
-		clk:      clk,
-		httpPort: httpPort,
-		tlsPort:  tlsPort,
-		tasks:    make(chan *vaTask, taskQueueSize),
-		sleep:    true,
+		log:          log,
+		clk:          clk,
+		httpPort:     httpPort,
+		tlsPort:      tlsPort,
+		tasks:        make(chan *vaTask, taskQueueSize),
+		sleep:        true,
+		skipValidate: false,
 	}
 
 	// Read the PEBBLE_VA_NOSLEEP environment variable string
@@ -98,6 +106,13 @@ func New(
 	case "1", "true", "True", "TRUE":
 		va.sleep = false
 		va.log.Printf("Disabling random VA sleeps")
+	}
+
+	skipValidation := os.Getenv(skipValidationEnvVar)
+	switch skipValidation {
+	case "1", "true", "True", "TRUE":
+		va.skipValidate = true
+		va.log.Printf("Skipping validation of challenges")
 	}
 
 	go va.processTasks()
@@ -216,6 +231,10 @@ func (va VAImpl) validateDNS01(task *vaTask) *core.ValidationRecord {
 		ValidatedAt: va.clk.Now(),
 	}
 
+	if va.skipValidate {
+		return result
+	}
+
 	txts, err := net.LookupTXT(challengeSubdomain)
 	if err != nil {
 		result.Error = acme.UnauthorizedProblem("Error retrieving TXT records for DNS challenge")
@@ -252,6 +271,10 @@ func (va VAImpl) validateTLSSNI02(task *vaTask) *core.ValidationRecord {
 	result := &core.ValidationRecord{
 		URL:         hostPort,
 		ValidatedAt: va.clk.Now(),
+	}
+
+	if va.skipValidate {
+		return result
 	}
 
 	const tlsSNITokenID = "token"
@@ -354,6 +377,11 @@ func (va VAImpl) validateHTTP01(task *vaTask) *core.ValidationRecord {
 		ValidatedAt: va.clk.Now(),
 		Error:       err,
 	}
+
+	if va.skipValidate {
+		return result
+	}
+
 	if result.Error != nil {
 		return result
 	}
@@ -380,6 +408,10 @@ func (va VAImpl) fetchHTTP(identifier string, token string) ([]byte, string, *ac
 		Scheme: "http",
 		Host:   fmt.Sprintf("%s:%d", identifier, va.httpPort),
 		Path:   path,
+	}
+
+	if va.skipValidate {
+		return []byte(""), url.String(), nil
 	}
 
 	va.log.Printf("Attempting to validate w/ HTTP: %s\n", url)
